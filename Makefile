@@ -55,7 +55,7 @@ OPERATOR_SDK_VERSION ?= v1.39.0
 # Image URL to use all building/pushing image targets
 IMG ?= openshift.io/external-secrets-operator:latest
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.31.0
+ENVTEST_K8S_VERSION = 1.32.0
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -128,7 +128,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -vE 'test/[e2e|apis|utils]') -coverprofile cover.out
 
 update-operand-manifests: helm yq
 	hack/update-external-secrets-manifests.sh $(EXTERNAL_SECRETS_VERSION)
@@ -233,6 +233,7 @@ GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 YQ = $(LOCALBIN)/yq
 HELM ?= $(LOCALBIN)/helm
 REFERENCE_DOC_GENERATOR ?= $(LOCALBIN)/crd-ref-docs
+GINKGO ?= $(LOCALBIN)/ginkgo
 
 ## Tool Versions
 YQ_VERSION = v4.45.2
@@ -262,11 +263,15 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 crd-ref-docs: $(LOCALBIN) ## Download crd-ref-docs locally if necessary.
 	$(call go-install-tool,$(REFERENCE_DOC_GENERATOR),github.com/elastic/crd-ref-docs)
 
+.PHONY: ginkgo
+ginkgo: $(LOCALBIN) ## Download ginkgo locally if necessary.
+	$(call go-install-tool,$(GINKGO),github.com/onsi/ginkgo/v2/ginkgo)
+
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
 # $2 - package url which can be installed
 define go-install-tool
-@[ -f "$(1)" ] || { \
+@{ \
 set -e; \
 package=$(2) ;\
 echo "Downloading $${package}" ;\
@@ -385,3 +390,8 @@ check-git-diff: update
 .PHONY: docs
 docs: crd-ref-docs
 	$(REFERENCE_DOC_GENERATOR) --source-path=api/v1alpha1/ --renderer=markdown --config=hack/docs/config.yaml --output-path=docs/api_reference.md
+
+# Utilize controller-runtime provided envtest for API integration test
+.PHONY: test-apis  ## Run only the api integration tests.
+test-apis: envtest ginkgo
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" ./hack/test-apis.sh
