@@ -420,3 +420,303 @@ func TestCreateOrApplyDeployments(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateProxyEnvironmentVariables(t *testing.T) {
+	tests := []struct {
+		name                     string
+		deployment               *appsv1.Deployment
+		externalSecretsConfig    *v1alpha1.ExternalSecretsConfig
+		externalSecretsManager   *v1alpha1.ExternalSecretsManager
+		olmEnvVars               map[string]string
+		expectedContainerEnvVars map[string][]corev1.EnvVar // container name -> env vars
+	}{
+		{
+			name: "ExternalSecretsConfig proxy takes precedence",
+			deployment: &appsv1.Deployment{
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "external-secrets"},
+								{Name: "webhook"},
+							},
+						},
+					},
+				},
+			},
+			externalSecretsConfig: &v1alpha1.ExternalSecretsConfig{
+				Spec: v1alpha1.ExternalSecretsConfigSpec{
+					ApplicationConfig: v1alpha1.ApplicationConfig{
+						CommonConfigs: v1alpha1.CommonConfigs{
+							Proxy: &v1alpha1.ProxyConfig{
+								HTTPProxy:  "http://esc-proxy:8080",
+								HTTPSProxy: "https://esc-proxy:8443",
+								NoProxy:    "esc.local",
+							},
+						},
+					},
+				},
+			},
+			externalSecretsManager: &v1alpha1.ExternalSecretsManager{
+				Spec: v1alpha1.ExternalSecretsManagerSpec{
+					GlobalConfig: &v1alpha1.GlobalConfig{
+						CommonConfigs: v1alpha1.CommonConfigs{
+							Proxy: &v1alpha1.ProxyConfig{
+								HTTPProxy:  "http://esm-proxy:8080",
+								HTTPSProxy: "https://esm-proxy:8443",
+								NoProxy:    "esm.local",
+							},
+						},
+					},
+				},
+			},
+			olmEnvVars: map[string]string{
+				"HTTP_PROXY":  "http://olm-proxy:8080",
+				"HTTPS_PROXY": "https://olm-proxy:8443",
+				"NO_PROXY":    "olm.local",
+			},
+			expectedContainerEnvVars: map[string][]corev1.EnvVar{
+				"external-secrets": {
+					{Name: "HTTP_PROXY", Value: "http://esc-proxy:8080"},
+					{Name: "HTTPS_PROXY", Value: "https://esc-proxy:8443"},
+					{Name: "NO_PROXY", Value: "esc.local"},
+				},
+				"webhook": {
+					{Name: "HTTP_PROXY", Value: "http://esc-proxy:8080"},
+					{Name: "HTTPS_PROXY", Value: "https://esc-proxy:8443"},
+					{Name: "NO_PROXY", Value: "esc.local"},
+				},
+			},
+		},
+		{
+			name: "ExternalSecretsManager proxy when ESC has no proxy",
+			deployment: &appsv1.Deployment{
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "external-secrets"},
+								{Name: "webhook"},
+							},
+						},
+					},
+				},
+			},
+			externalSecretsConfig: &v1alpha1.ExternalSecretsConfig{
+				Spec: v1alpha1.ExternalSecretsConfigSpec{
+					ApplicationConfig: v1alpha1.ApplicationConfig{
+						CommonConfigs: v1alpha1.CommonConfigs{
+							// No proxy config
+						},
+					},
+				},
+			},
+			externalSecretsManager: &v1alpha1.ExternalSecretsManager{
+				Spec: v1alpha1.ExternalSecretsManagerSpec{
+					GlobalConfig: &v1alpha1.GlobalConfig{
+						CommonConfigs: v1alpha1.CommonConfigs{
+							Proxy: &v1alpha1.ProxyConfig{
+								HTTPProxy:  "http://esm-proxy:8080",
+								HTTPSProxy: "https://esm-proxy:8443",
+								NoProxy:    "esm.local",
+							},
+						},
+					},
+				},
+			},
+			olmEnvVars: map[string]string{
+				"HTTP_PROXY":  "http://olm-proxy:8080",
+				"HTTPS_PROXY": "https://olm-proxy:8443",
+				"NO_PROXY":    "olm.local",
+			},
+			expectedContainerEnvVars: map[string][]corev1.EnvVar{
+				"external-secrets": {
+					{Name: "HTTP_PROXY", Value: "http://esm-proxy:8080"},
+					{Name: "HTTPS_PROXY", Value: "https://esm-proxy:8443"},
+					{Name: "NO_PROXY", Value: "esm.local"},
+				},
+				"webhook": {
+					{Name: "HTTP_PROXY", Value: "http://esm-proxy:8080"},
+					{Name: "HTTPS_PROXY", Value: "https://esm-proxy:8443"},
+					{Name: "NO_PROXY", Value: "esm.local"},
+				},
+			},
+		},
+		{
+			name: "OLM environment variables used when no config proxy",
+			deployment: &appsv1.Deployment{
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "external-secrets"},
+							},
+						},
+					},
+				},
+			},
+			externalSecretsConfig:  &v1alpha1.ExternalSecretsConfig{},
+			externalSecretsManager: &v1alpha1.ExternalSecretsManager{},
+			olmEnvVars: map[string]string{
+				"HTTP_PROXY":  "http://olm-proxy:8080",
+				"HTTPS_PROXY": "https://olm-proxy:8443",
+				"NO_PROXY":    "olm.local",
+			},
+			expectedContainerEnvVars: map[string][]corev1.EnvVar{
+				"external-secrets": {
+					{Name: "HTTP_PROXY", Value: "http://olm-proxy:8080"},
+					{Name: "HTTPS_PROXY", Value: "https://olm-proxy:8443"},
+					{Name: "NO_PROXY", Value: "olm.local"},
+				},
+			},
+		},
+		{
+			name: "Partial proxy configuration",
+			deployment: &appsv1.Deployment{
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "external-secrets"},
+							},
+						},
+					},
+				},
+			},
+			externalSecretsConfig: &v1alpha1.ExternalSecretsConfig{
+				Spec: v1alpha1.ExternalSecretsConfigSpec{
+					ApplicationConfig: v1alpha1.ApplicationConfig{
+						CommonConfigs: v1alpha1.CommonConfigs{
+							Proxy: &v1alpha1.ProxyConfig{
+								HTTPProxy: "http://esc-proxy:8080",
+								// HTTPSProxy and NoProxy are empty
+							},
+						},
+					},
+				},
+			},
+			externalSecretsManager: &v1alpha1.ExternalSecretsManager{},
+			olmEnvVars:             map[string]string{},
+			expectedContainerEnvVars: map[string][]corev1.EnvVar{
+				"external-secrets": {
+					{Name: "HTTP_PROXY", Value: "http://esc-proxy:8080"},
+				},
+			},
+		},
+		{
+			name: "Update existing proxy environment variables",
+			deployment: &appsv1.Deployment{
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "external-secrets",
+									Env: []corev1.EnvVar{
+										{Name: "HTTP_PROXY", Value: "http://old-proxy:8080"},
+										{Name: "EXISTING_VAR", Value: "existing-value"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			externalSecretsConfig: &v1alpha1.ExternalSecretsConfig{
+				Spec: v1alpha1.ExternalSecretsConfigSpec{
+					ApplicationConfig: v1alpha1.ApplicationConfig{
+						CommonConfigs: v1alpha1.CommonConfigs{
+							Proxy: &v1alpha1.ProxyConfig{
+								HTTPProxy:  "http://new-proxy:8080",
+								HTTPSProxy: "https://new-proxy:8443",
+								NoProxy:    "localhost",
+							},
+						},
+					},
+				},
+			},
+			externalSecretsManager: &v1alpha1.ExternalSecretsManager{},
+			olmEnvVars:             map[string]string{},
+			expectedContainerEnvVars: map[string][]corev1.EnvVar{
+				"external-secrets": {
+					{Name: "HTTP_PROXY", Value: "http://new-proxy:8080"},
+					{Name: "EXISTING_VAR", Value: "existing-value"},
+					{Name: "HTTPS_PROXY", Value: "https://new-proxy:8443"},
+					{Name: "NO_PROXY", Value: "localhost"},
+				},
+			},
+		},
+		{
+			name: "No proxy configuration results in no changes",
+			deployment: &appsv1.Deployment{
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "external-secrets",
+									Env: []corev1.EnvVar{
+										{Name: "EXISTING_VAR", Value: "existing-value"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			externalSecretsConfig:  &v1alpha1.ExternalSecretsConfig{},
+			externalSecretsManager: &v1alpha1.ExternalSecretsManager{},
+			olmEnvVars:             map[string]string{},
+			expectedContainerEnvVars: map[string][]corev1.EnvVar{
+				"external-secrets": {
+					{Name: "EXISTING_VAR", Value: "existing-value"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set up environment variables
+			for key, value := range tt.olmEnvVars {
+				t.Setenv(key, value)
+			}
+
+			r := &Reconciler{
+				esm: tt.externalSecretsManager,
+			}
+
+			err := r.updateProxyEnvironmentVariables(tt.deployment, tt.externalSecretsConfig)
+			if err != nil {
+				t.Errorf("updateProxyEnvironmentVariables() error = %v", err)
+				return
+			}
+
+			// Verify that each container has the expected environment variables
+			for _, container := range tt.deployment.Spec.Template.Spec.Containers {
+				expectedEnvVars, exists := tt.expectedContainerEnvVars[container.Name]
+				if !exists {
+					t.Errorf("Container %s not found in expectedContainerEnvVars", container.Name)
+					return
+				}
+
+				if len(container.Env) != len(expectedEnvVars) {
+					t.Errorf("Container %s has %d env vars, want %d", container.Name, len(container.Env), len(expectedEnvVars))
+				}
+
+				for _, expectedEnv := range expectedEnvVars {
+					found := false
+					for _, actualEnv := range container.Env {
+						if actualEnv.Name == expectedEnv.Name && actualEnv.Value == expectedEnv.Value {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("Container %s missing expected env var: %v", container.Name, expectedEnv)
+					}
+				}
+			}
+		})
+	}
+}

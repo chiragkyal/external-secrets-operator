@@ -144,6 +144,9 @@ func (r *Reconciler) getDeploymentObject(assetName string, esc *operatorv1alpha1
 	if err := r.updateNodeSelector(deployment, esc); err != nil {
 		return nil, fmt.Errorf("failed to update node selector: %w", err)
 	}
+	if err := r.updateProxyEnvironmentVariables(deployment, esc); err != nil {
+		return nil, fmt.Errorf("failed to update proxy environment variables: %w", err)
+	}
 
 	return deployment, nil
 }
@@ -390,4 +393,85 @@ func updateBitwardenServerContainerSpec(deployment *appsv1.Deployment, image str
 			break
 		}
 	}
+}
+
+// updateProxyEnvironmentVariables sets proxy environment variables on all containers in the deployment.
+func (r *Reconciler) updateProxyEnvironmentVariables(deployment *appsv1.Deployment, esc *operatorv1alpha1.ExternalSecretsConfig) error {
+	proxyConfig := r.getProxyConfiguration(esc)
+	if proxyConfig == nil {
+		return nil
+	}
+
+	// Apply proxy environment variables to all containers
+	for i := range deployment.Spec.Template.Spec.Containers {
+		container := &deployment.Spec.Template.Spec.Containers[i]
+		r.setProxyEnvVars(container, proxyConfig)
+	}
+
+	return nil
+}
+
+// getProxyConfiguration returns the proxy configuration based on precedence.
+// The precedence order is: ExternalSecretsConfig > ExternalSecretsManager > OLM environment variables.
+func (r *Reconciler) getProxyConfiguration(esc *operatorv1alpha1.ExternalSecretsConfig) *operatorv1alpha1.ProxyConfig {
+	var proxyConfig *operatorv1alpha1.ProxyConfig
+
+	// Check ExternalSecretsConfig first
+	if esc.Spec.ApplicationConfig.Proxy != nil { // TODO: check if esc.Spec.ApplicationConfig != nil is required
+		proxyConfig = esc.Spec.ApplicationConfig.Proxy
+	} else if r.esm.Spec.GlobalConfig != nil && r.esm.Spec.GlobalConfig.Proxy != nil {
+		// Check ExternalSecretsManager second
+		proxyConfig = r.esm.Spec.GlobalConfig.Proxy
+	} else {
+		// Fall back to OLM environment variables
+		olmHTTPProxy := os.Getenv("HTTP_PROXY")
+		olmHTTPSProxy := os.Getenv("HTTPS_PROXY")
+		olmNoProxy := os.Getenv("NO_PROXY")
+
+		// Only create proxy config if at least one OLM env var is set
+		if olmHTTPProxy != "" || olmHTTPSProxy != "" || olmNoProxy != "" {
+			proxyConfig = &operatorv1alpha1.ProxyConfig{
+				HTTPProxy:  olmHTTPProxy,
+				HTTPSProxy: olmHTTPSProxy,
+				NoProxy:    olmNoProxy,
+			}
+		}
+	}
+
+	return proxyConfig
+}
+
+// setProxyEnvVars sets proxy environment variables on a container.
+func (r *Reconciler) setProxyEnvVars(container *corev1.Container, proxyConfig *operatorv1alpha1.ProxyConfig) {
+	if proxyConfig == nil {
+		return
+	}
+	if container.Env == nil {
+		container.Env = []corev1.EnvVar{}
+	}
+
+	setEnvVar := func(name, value string) {
+		if value == "" {
+			return
+		}
+
+		// Check if the environment variable already exists
+		for i, env := range container.Env {
+			if env.Name == name {
+				container.Env[i].Value = value
+				return
+			}
+		}
+
+		// Add new environment variable if it doesn't exist
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  name,
+			Value: value,
+		})
+	}
+
+	// Set proxy environment variables
+	setEnvVar("HTTP_PROXY", proxyConfig.HTTPProxy)
+	setEnvVar("HTTPS_PROXY", proxyConfig.HTTPSProxy)
+	setEnvVar("NO_PROXY", proxyConfig.NoProxy)
 }
