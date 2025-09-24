@@ -144,8 +144,8 @@ func (r *Reconciler) getDeploymentObject(assetName string, esc *operatorv1alpha1
 	if err := r.updateNodeSelector(deployment, esc); err != nil {
 		return nil, fmt.Errorf("failed to update node selector: %w", err)
 	}
-	if err := r.updateProxyEnvironmentVariables(deployment, esc); err != nil {
-		return nil, fmt.Errorf("failed to update proxy environment variables: %w", err)
+	if err := r.updateProxyConfiguration(deployment, esc); err != nil {
+		return nil, fmt.Errorf("failed to update proxy configuration: %w", err)
 	}
 
 	return deployment, nil
@@ -395,6 +395,18 @@ func updateBitwardenServerContainerSpec(deployment *appsv1.Deployment, image str
 	}
 }
 
+// updateProxyConfiguration applies all proxy-related configuration to the deployment.
+func (r *Reconciler) updateProxyConfiguration(deployment *appsv1.Deployment, esc *operatorv1alpha1.ExternalSecretsConfig) error {
+	if err := r.updateProxyEnvironmentVariables(deployment, esc); err != nil {
+		return fmt.Errorf("failed to update proxy environment variables: %w", err)
+	}
+	if err := r.updateTrustedCABundleVolumes(deployment, esc); err != nil {
+		return fmt.Errorf("failed to update trusted CA bundle volumes: %w", err)
+	}
+
+	return nil
+}
+
 // updateProxyEnvironmentVariables sets proxy environment variables on all containers in the deployment.
 func (r *Reconciler) updateProxyEnvironmentVariables(deployment *appsv1.Deployment, esc *operatorv1alpha1.ExternalSecretsConfig) error {
 	proxyConfig := r.getProxyConfiguration(esc)
@@ -409,36 +421,6 @@ func (r *Reconciler) updateProxyEnvironmentVariables(deployment *appsv1.Deployme
 	}
 
 	return nil
-}
-
-// getProxyConfiguration returns the proxy configuration based on precedence.
-// The precedence order is: ExternalSecretsConfig > ExternalSecretsManager > OLM environment variables.
-func (r *Reconciler) getProxyConfiguration(esc *operatorv1alpha1.ExternalSecretsConfig) *operatorv1alpha1.ProxyConfig {
-	var proxyConfig *operatorv1alpha1.ProxyConfig
-
-	// Check ExternalSecretsConfig first
-	if esc.Spec.ApplicationConfig.Proxy != nil { // TODO: check if esc.Spec.ApplicationConfig != nil is required
-		proxyConfig = esc.Spec.ApplicationConfig.Proxy
-	} else if r.esm.Spec.GlobalConfig != nil && r.esm.Spec.GlobalConfig.Proxy != nil {
-		// Check ExternalSecretsManager second
-		proxyConfig = r.esm.Spec.GlobalConfig.Proxy
-	} else {
-		// Fall back to OLM environment variables
-		olmHTTPProxy := os.Getenv("HTTP_PROXY")
-		olmHTTPSProxy := os.Getenv("HTTPS_PROXY")
-		olmNoProxy := os.Getenv("NO_PROXY")
-
-		// Only create proxy config if at least one OLM env var is set
-		if olmHTTPProxy != "" || olmHTTPSProxy != "" || olmNoProxy != "" {
-			proxyConfig = &operatorv1alpha1.ProxyConfig{
-				HTTPProxy:  olmHTTPProxy,
-				HTTPSProxy: olmHTTPSProxy,
-				NoProxy:    olmNoProxy,
-			}
-		}
-	}
-
-	return proxyConfig
 }
 
 // setProxyEnvVars sets proxy environment variables on a container.
@@ -474,4 +456,72 @@ func (r *Reconciler) setProxyEnvVars(container *corev1.Container, proxyConfig *o
 	setEnvVar("HTTP_PROXY", proxyConfig.HTTPProxy)
 	setEnvVar("HTTPS_PROXY", proxyConfig.HTTPSProxy)
 	setEnvVar("NO_PROXY", proxyConfig.NoProxy)
+}
+
+// updateTrustedCABundleVolumes adds trusted CA bundle volume and volume mounts to the deployment
+// when proxy configuration is present.
+func (r *Reconciler) updateTrustedCABundleVolumes(deployment *appsv1.Deployment, esc *operatorv1alpha1.ExternalSecretsConfig) error {
+	proxyConfig := r.getProxyConfiguration(esc)
+
+	// Only add trusted CA bundle if proxy is configured
+	if proxyConfig == nil {
+		return nil
+	}
+
+	// Add the trusted CA bundle volume to the pod spec
+	trustedCAVolume := corev1.Volume{
+		Name: trustedCABundleVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: trustedCABundleConfigMapName,
+				},
+				Items: []corev1.KeyToPath{
+					{
+						Key:  trustedCABundleKeyName,
+						Path: trustedCABundleKeyName,
+					},
+				},
+			},
+		},
+	}
+
+	// Check if the volume already exists, if not add it
+	volumeExists := false
+	for i, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.Name == trustedCABundleVolumeName {
+			deployment.Spec.Template.Spec.Volumes[i] = trustedCAVolume
+			volumeExists = true
+			break
+		}
+	}
+	if !volumeExists {
+		deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, trustedCAVolume)
+	}
+
+	// Add volume mounts to all containers
+	trustedCAVolumeMount := corev1.VolumeMount{
+		Name:      trustedCABundleVolumeName,
+		MountPath: trustedCABundleMountPath,
+		ReadOnly:  true,
+	}
+
+	for i := range deployment.Spec.Template.Spec.Containers {
+		container := &deployment.Spec.Template.Spec.Containers[i]
+
+		// Check if the volume mount already exists, if not add it
+		volumeMountExists := false
+		for j, volumeMount := range container.VolumeMounts {
+			if volumeMount.Name == trustedCABundleVolumeName {
+				container.VolumeMounts[j] = trustedCAVolumeMount
+				volumeMountExists = true
+				break
+			}
+		}
+		if !volumeMountExists {
+			container.VolumeMounts = append(container.VolumeMounts, trustedCAVolumeMount)
+		}
+	}
+
+	return nil
 }

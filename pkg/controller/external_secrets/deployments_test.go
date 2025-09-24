@@ -2,6 +2,7 @@ package external_secrets
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -421,14 +422,34 @@ func TestCreateOrApplyDeployments(t *testing.T) {
 	}
 }
 
-func TestUpdateProxyEnvironmentVariables(t *testing.T) {
+func TestUpdateProxyConfiguration(t *testing.T) {
+	// Expected trusted CA bundle volume
+	expectedTrustedCAVolume := corev1.Volume{
+		Name: "trusted-ca-bundle",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: "external-secrets-trusted-ca-bundle",
+				},
+				Items: []corev1.KeyToPath{
+					{
+						Key:  "ca-bundle.crt",
+						Path: "ca-bundle.crt",
+					},
+				},
+			},
+		},
+	}
+
 	tests := []struct {
 		name                     string
 		deployment               *appsv1.Deployment
 		externalSecretsConfig    *v1alpha1.ExternalSecretsConfig
 		externalSecretsManager   *v1alpha1.ExternalSecretsManager
 		olmEnvVars               map[string]string
-		expectedContainerEnvVars map[string][]corev1.EnvVar // container name -> env vars
+		expectedContainerEnvVars map[string][]corev1.EnvVar      // container name -> env vars
+		expectedVolumes          []corev1.Volume                 // expected volumes in the deployment
+		expectedVolumeMounts     map[string][]corev1.VolumeMount // container name -> volume mounts
 	}{
 		{
 			name: "ExternalSecretsConfig proxy takes precedence",
@@ -487,6 +508,15 @@ func TestUpdateProxyEnvironmentVariables(t *testing.T) {
 					{Name: "NO_PROXY", Value: "esc.local"},
 				},
 			},
+			expectedVolumes: []corev1.Volume{expectedTrustedCAVolume},
+			expectedVolumeMounts: map[string][]corev1.VolumeMount{
+				"external-secrets": {
+					{Name: "trusted-ca-bundle", MountPath: "/etc/pki/tls/certs", ReadOnly: true},
+				},
+				"webhook": {
+					{Name: "trusted-ca-bundle", MountPath: "/etc/pki/tls/certs", ReadOnly: true},
+				},
+			},
 		},
 		{
 			name: "ExternalSecretsManager proxy when ESC has no proxy",
@@ -541,6 +571,15 @@ func TestUpdateProxyEnvironmentVariables(t *testing.T) {
 					{Name: "NO_PROXY", Value: "esm.local"},
 				},
 			},
+			expectedVolumes: []corev1.Volume{expectedTrustedCAVolume},
+			expectedVolumeMounts: map[string][]corev1.VolumeMount{
+				"external-secrets": {
+					{Name: "trusted-ca-bundle", MountPath: "/etc/pki/tls/certs", ReadOnly: true},
+				},
+				"webhook": {
+					{Name: "trusted-ca-bundle", MountPath: "/etc/pki/tls/certs", ReadOnly: true},
+				},
+			},
 		},
 		{
 			name: "OLM environment variables used when no config proxy",
@@ -567,6 +606,12 @@ func TestUpdateProxyEnvironmentVariables(t *testing.T) {
 					{Name: "HTTP_PROXY", Value: "http://olm-proxy:8080"},
 					{Name: "HTTPS_PROXY", Value: "https://olm-proxy:8443"},
 					{Name: "NO_PROXY", Value: "olm.local"},
+				},
+			},
+			expectedVolumes: []corev1.Volume{expectedTrustedCAVolume},
+			expectedVolumeMounts: map[string][]corev1.VolumeMount{
+				"external-secrets": {
+					{Name: "trusted-ca-bundle", MountPath: "/etc/pki/tls/certs", ReadOnly: true},
 				},
 			},
 		},
@@ -600,6 +645,12 @@ func TestUpdateProxyEnvironmentVariables(t *testing.T) {
 			expectedContainerEnvVars: map[string][]corev1.EnvVar{
 				"external-secrets": {
 					{Name: "HTTP_PROXY", Value: "http://esc-proxy:8080"},
+				},
+			},
+			expectedVolumes: []corev1.Volume{expectedTrustedCAVolume},
+			expectedVolumeMounts: map[string][]corev1.VolumeMount{
+				"external-secrets": {
+					{Name: "trusted-ca-bundle", MountPath: "/etc/pki/tls/certs", ReadOnly: true},
 				},
 			},
 		},
@@ -645,6 +696,12 @@ func TestUpdateProxyEnvironmentVariables(t *testing.T) {
 					{Name: "NO_PROXY", Value: "localhost"},
 				},
 			},
+			expectedVolumes: []corev1.Volume{expectedTrustedCAVolume},
+			expectedVolumeMounts: map[string][]corev1.VolumeMount{
+				"external-secrets": {
+					{Name: "trusted-ca-bundle", MountPath: "/etc/pki/tls/certs", ReadOnly: true},
+				},
+			},
 		},
 		{
 			name: "No proxy configuration results in no changes",
@@ -672,6 +729,8 @@ func TestUpdateProxyEnvironmentVariables(t *testing.T) {
 					{Name: "EXISTING_VAR", Value: "existing-value"},
 				},
 			},
+			expectedVolumes:      []corev1.Volume{},
+			expectedVolumeMounts: map[string][]corev1.VolumeMount{},
 		},
 	}
 
@@ -686,37 +745,100 @@ func TestUpdateProxyEnvironmentVariables(t *testing.T) {
 				esm: tt.externalSecretsManager,
 			}
 
-			err := r.updateProxyEnvironmentVariables(tt.deployment, tt.externalSecretsConfig)
+			err := r.updateProxyConfiguration(tt.deployment, tt.externalSecretsConfig)
 			if err != nil {
-				t.Errorf("updateProxyEnvironmentVariables() error = %v", err)
+				t.Errorf("updateProxyConfiguration() error = %v", err)
 				return
 			}
 
-			// Verify that each container has the expected environment variables
-			for _, container := range tt.deployment.Spec.Template.Spec.Containers {
-				expectedEnvVars, exists := tt.expectedContainerEnvVars[container.Name]
-				if !exists {
-					t.Errorf("Container %s not found in expectedContainerEnvVars", container.Name)
-					return
-				}
-
-				if len(container.Env) != len(expectedEnvVars) {
-					t.Errorf("Container %s has %d env vars, want %d", container.Name, len(container.Env), len(expectedEnvVars))
-				}
-
-				for _, expectedEnv := range expectedEnvVars {
-					found := false
-					for _, actualEnv := range container.Env {
-						if actualEnv.Name == expectedEnv.Name && actualEnv.Value == expectedEnv.Value {
-							found = true
-							break
-						}
-					}
-					if !found {
-						t.Errorf("Container %s missing expected env var: %v", container.Name, expectedEnv)
-					}
-				}
-			}
+			validateEnvironmentVariables(t, tt.deployment, tt.expectedContainerEnvVars)
+			validateVolumes(t, tt.deployment, tt.expectedVolumes)
+			validateVolumeMounts(t, tt.deployment, tt.expectedVolumeMounts)
 		})
 	}
+}
+
+// validateEnvironmentVariables validates that containers have expected environment variables
+func validateEnvironmentVariables(t *testing.T, deployment *appsv1.Deployment, expectedContainerEnvVars map[string][]corev1.EnvVar) {
+	for containerName, expectedEnvVars := range expectedContainerEnvVars {
+		container := findContainer(deployment, containerName)
+		if container == nil {
+			t.Errorf("Container %s not found in deployment", containerName)
+			return
+		}
+		if !reflect.DeepEqual(container.Env, expectedEnvVars) {
+			t.Errorf("Container %s environment variables mismatch.\nExpected: %+v\nActual: %+v",
+				containerName, expectedEnvVars, container.Env)
+		}
+	}
+}
+
+// validateVolumes validates that deployment has expected volumes
+func validateVolumes(t *testing.T, deployment *appsv1.Deployment, expectedVolumes []corev1.Volume) {
+	if len(expectedVolumes) == 0 {
+		// Verify no trusted CA bundle volume was added
+		for _, volume := range deployment.Spec.Template.Spec.Volumes {
+			if volume.Name == trustedCABundleVolumeName {
+				t.Errorf("Expected no trusted CA bundle volume, but found one: %+v", volume)
+			}
+		}
+		return
+	}
+
+	// Verify expected volumes exist and match exactly
+	if !reflect.DeepEqual(deployment.Spec.Template.Spec.Volumes, expectedVolumes) {
+		t.Errorf("Volumes mismatch.\nExpected: %+v\nActual: %+v",
+			expectedVolumes, deployment.Spec.Template.Spec.Volumes)
+	}
+}
+
+// validateVolumeMounts validates that containers have expected volume mounts
+func validateVolumeMounts(t *testing.T, deployment *appsv1.Deployment, expectedVolumeMounts map[string][]corev1.VolumeMount) {
+	if len(expectedVolumeMounts) == 0 {
+		// Verify no trusted CA bundle volume mounts exist in any container
+		for _, container := range deployment.Spec.Template.Spec.Containers {
+			trustedCAMounts := filterTrustedCAMounts(container.VolumeMounts)
+			if len(trustedCAMounts) > 0 {
+				t.Errorf("Expected no trusted CA bundle volume mount in container %s, but found: %+v",
+					container.Name, trustedCAMounts)
+			}
+		}
+		return
+	}
+
+	// Verify expected volume mounts exist
+	for containerName, expectedMounts := range expectedVolumeMounts {
+		container := findContainer(deployment, containerName)
+		if container == nil {
+			t.Errorf("Container %s not found for volume mount validation", containerName)
+			continue
+		}
+
+		actualMounts := filterTrustedCAMounts(container.VolumeMounts)
+		if !reflect.DeepEqual(actualMounts, expectedMounts) {
+			t.Errorf("Container %s volume mounts mismatch.\nExpected: %+v\nActual: %+v",
+				containerName, expectedMounts, actualMounts)
+		}
+	}
+}
+
+// findContainer finds a container by name in the deployment
+func findContainer(deployment *appsv1.Deployment, containerName string) *corev1.Container {
+	for i, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name == containerName {
+			return &deployment.Spec.Template.Spec.Containers[i]
+		}
+	}
+	return nil
+}
+
+// filterTrustedCAMounts filters volume mounts to only include trusted CA bundle mounts
+func filterTrustedCAMounts(volumeMounts []corev1.VolumeMount) []corev1.VolumeMount {
+	var trustedCAMounts []corev1.VolumeMount
+	for _, mount := range volumeMounts {
+		if mount.Name == trustedCABundleVolumeName {
+			trustedCAMounts = append(trustedCAMounts, mount)
+		}
+	}
+	return trustedCAMounts
 }

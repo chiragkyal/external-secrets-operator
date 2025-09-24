@@ -48,6 +48,21 @@ const (
 	// externalsecretsDefaultNamespace is the namespace where the `external-secrets` operand required resources
 	// will be created, when ExternalSecretsConfig.Spec.Namespace is not set.
 	externalsecretsDefaultNamespace = "external-secrets"
+
+	// trustedCABundleConfigMapName is the name of the ConfigMap containing the trusted CA bundle
+	trustedCABundleConfigMapName = externalsecretsCommonName + "-trusted-ca-bundle"
+
+	// trustedCABundleInjectLabel is the label that triggers OpenShift CNO to inject cluster-wide CA certificates
+	trustedCABundleInjectLabel = "config.openshift.io/inject-trusted-cabundle"
+
+	// trustedCABundleVolumeName is the name of the volume for mounting the CA bundle
+	trustedCABundleVolumeName = "trusted-ca-bundle"
+
+	// trustedCABundleMountPath is the path where the CA bundle should be mounted in containers
+	trustedCABundleMountPath = "/etc/pki/tls/certs"
+
+	// trustedCABundleKeyName is the key in the ConfigMap that contains the CA bundle
+	trustedCABundleKeyName = "ca-bundle.crt"
 )
 
 var (
