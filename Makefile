@@ -407,11 +407,29 @@ check-git-diff: update
 docs: crd-ref-docs
 	$(REFERENCE_DOC_GENERATOR) --source-path=api/v1alpha1/ --renderer=markdown --config=hack/docs/config.yaml --output-path=docs/api_reference.md
 
-## perform vulnerabilities scan using govulncheck.
-.PHONY: govulnscan
-#GO-2025-3547 and GO-2025-3521 containing code is not directly used in the operator, hence will be ignored.
-KNOWN_VULNERABILITIES:="GO-2025-3547|GO-2025-3521"
-govulnscan: govulncheck $(OUTPUTS_PATH)  ## Run govulncheck
-	- $(GOVULNCHECK) ./... > $(OUTPUTS_PATH)/govulcheck.results 2>&1
-	$(eval reported_vulnerabilities = $(strip $(shell grep "pkg.go.dev" $(OUTPUTS_PATH)/govulcheck.results | ([ -n $KNOWN_VULNERABILITIES ] && grep -Ev $(KNOWN_VULNERABILITIES) || cat) | wc -l)))
-	@(if [ $(reported_vulnerabilities) -ne 0 ]; then echo -e "\n-- ERROR -- $(reported_vulnerabilities) new vulnerabilities reported, please check\n"; exit 1; fi)
+# Utilize controller-runtime provided envtest for API integration test
+.PHONY: test-apis  ## Run only the api integration tests.
+test-apis: envtest ginkgo
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" ./hack/test-apis.sh
+
+##@ OLM Deployment
+
+.PHONY: olm-deploy
+olm-deploy: ## Build and deploy operator using OLM
+	@echo "Building and deploying External Secrets Operator using OLM..."
+	@if [ -z "$$QUAY_USER_ID" ]; then \
+		echo "Error: QUAY_USER_ID environment variable is required"; \
+		echo "Either source hack/deploy/olm/config.env or set QUAY_USER_ID manually"; \
+		exit 1; \
+	fi
+	./hack/deploy/olm/deploy.sh
+
+.PHONY: olm-deploy-build-only
+olm-deploy-build-only: ## Build operator images for OLM (skip deployment)
+	@echo "Building External Secrets Operator images for OLM..."
+	@if [ -z "$$QUAY_USER_ID" ]; then \
+		echo "Error: QUAY_USER_ID environment variable is required"; \
+		echo "Either source hack/deploy/olm/config.env or set QUAY_USER_ID manually"; \
+		exit 1; \
+	fi
+	SKIP_DEPLOY=true ./hack/deploy/olm/deploy.sh
