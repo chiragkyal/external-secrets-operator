@@ -431,12 +431,6 @@ func TestUpdateProxyConfiguration(t *testing.T) {
 				LocalObjectReference: corev1.LocalObjectReference{
 					Name: "external-secrets-trusted-ca-bundle",
 				},
-				Items: []corev1.KeyToPath{
-					{
-						Key:  "ca-bundle.crt",
-						Path: "ca-bundle.crt",
-					},
-				},
 			},
 		},
 	}

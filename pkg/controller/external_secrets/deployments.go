@@ -476,12 +476,6 @@ func (r *Reconciler) updateTrustedCABundleVolumes(deployment *appsv1.Deployment,
 				LocalObjectReference: corev1.LocalObjectReference{
 					Name: trustedCABundleConfigMapName,
 				},
-				Items: []corev1.KeyToPath{
-					{
-						Key:  trustedCABundleKeyName,
-						Path: trustedCABundleKeyName,
-					},
-				},
 			},
 		},
 	}

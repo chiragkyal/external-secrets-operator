@@ -16,6 +16,3 @@ spec:
         - name: trusted-ca-bundle
           configMap:
             name: trusted-ca-bundle
-            items:
-              - key: ca-bundle.crt
-                path: ca-bundle.crt
