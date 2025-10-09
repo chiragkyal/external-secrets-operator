@@ -1,0 +1,325 @@
+Making Operators Proxy-Aware in OpenShift
+
+
+
+Chirag Kyal
+Software Engineer
+
+* Why Proxy Configuration Matters
+
+* Enterprise Network Requirements
+
+Most enterprise environments require all external traffic to flow through proxy servers:
+
+
+- Monitor and log all outbound connections
+- Block malicious domains and content
+- Scan outbound traffic for sensitive data
+- Audit Requirements
+
+
+* Configuring OpenShift Cluster-Wide Proxy
+
+* Overview
+
+OpenShift provides a centralized *Proxy* custom resource for the entire cluster.
+
+* Step 1: Create User CA Bundle
+
+If your proxy uses custom SSL certificates:
+
+.code -edit proxy-examples/ca-configmap.yaml
+
+Create it:
+
+  $ oc create configmap user-ca-bundle \
+      --from-file=ca-bundle.crt=/path/to/proxy-ca.crt \
+      -n openshift-config
+
+* Step 2: Configure Cluster-Wide Proxy
+
+Edit the cluster proxy resource:
+
+  $ oc edit proxy/cluster
+
+.code -edit proxy-examples/proxy-config.yaml
+
+* Step 3: Verify Configuration
+
+Check the proxy status:
+
+  $ oc get proxy/cluster -o yaml
+  $ oc get proxy/cluster -o jsonpath='{.status}'
+
+Status reflects the active configuration:
+
+  status:
+    httpProxy: http://proxy.example.com:8080
+    httpsProxy: https://proxy.example.com:8443
+    noProxy: .cluster.local,.svc,localhost,127.0.0.1
+
+*Important:* Always read from `status` fields, not `spec` - status reflects the actual active configuration.
+
+
+* Cluster Network Operator (CNO) Role
+
+* What is CNO?
+
+The *Cluster*Network*Operator* (CNO) manages:
+
+- Proxy configuration distribution
+- Certificate management
+
+
+
+* CA Bundle Injection
+
+CNO automatically injects CA bundles into ConfigMaps with this label:
+
+  labels:
+    config.openshift.io/inject-trusted-cabundle: "true"
+
+*How* *it* *works:*
+
+
+  ┌─────────────────────────────────────────┐
+  │    Cluster Network Operator (CNO)       │
+  ├─────────────────────────────────────────┤
+  │  1. Certificate Distribution            │
+  │     • Watch for injection label         │
+  │     • Inject trusted CA bundles         │
+  │                                         │
+  │  2. Automatic Updates                   │
+  │     • Handle certificate rotation       │
+  │     • Propagate config changes          │
+  └─────────────────────────────────────────┘
+
+* CA Bundle Injection Example
+
+Operator creates empty ConfigMap:
+
+.code -edit proxy-examples/configmap-empty.yaml
+
+CNO populates it:
+
+.code -edit proxy-examples/configmap-injected.yaml /START OMIT/,/END OMIT/
+
+* OLM and Operator Proxy Configuration
+
+* OLM Environment Variable Injection
+
+*Operator*Lifecycle*Manager* (OLM) automatically injects proxy environment variables into operator pods.
+
+When cluster proxy is configured, OLM adds:
+
+  env:
+    - name: HTTP_PROXY
+      value: http://proxy.example.com:8080
+    - name: HTTPS_PROXY
+      value: https://proxy.example.com:8443
+    - name: NO_PROXY
+      value: .cluster.local,.svc,localhost,127.0.0.1
+
+*This* *happens* *automatically* - no operator code changes needed for the operator pod itself!
+
+* Operator Trusted CA Bundle - Step 1
+
+Create ConfigMap using Kustomize `configMapGenerator`:
+
+.code -edit proxy-examples/kustomization.yaml
+
+This generates an empty ConfigMap that CNO will populate.
+
+* Operator Trusted CA Bundle - Step 2
+
+Mount ConfigMap in operator deployment:
+
+.code -edit proxy-examples/manager-deployment.yaml /START OMIT/,/END OMIT/
+
+* Operator Trusted CA Bundle - Step 3
+
+Generate OLM bundle:
+
+  $ make bundle
+
+The ConfigMap will be included in `bundle/manifests/`
+
+*Result:* Operator pod can now make HTTPS connections through the proxy with certificate validation! ✅
+
+* Making Operand Pods Proxy-Aware
+
+* Overview
+
+Now that the operator pod is proxy-aware, we need to configure the operand pods:
+
+  ┌─────────────────────────────────────────┐
+  │    Operator Responsibilities            │
+  ├─────────────────────────────────────────┤
+  │                                         │
+  │  1. Create Trusted CA ConfigMap         │
+  │     └── With injection label for CNO    │
+  │                                         │
+  │  2. Watch ConfigMap Changes             │
+  │     └── Only metadata (labels)          │
+  │                                         │
+  │  3. Apply Proxy to Operand Pods         │
+  │     ├── Environment variables           │
+  │     └── Volume mounts for CA bundle     │
+  │                                         │
+  └─────────────────────────────────────────┘
+
+* Step 1: Create Trusted CA ConfigMap for Operands
+
+Create a ConfigMap with the injection label:
+
+.code -edit proxy-examples/reconciler-configmap.go /START CONFIGMAP OMIT/,/END CONFIGMAP OMIT/
+
+* Ownership Model - IMPORTANT!
+
+ConfigMap ownership is split between CNO and Operator:
+
+  ConfigMap Ownership:
+  ├── CNO Manages:
+  │   ├── data.ca-bundle.crt (NEVER modify!)
+  │   └── annotations (mostly)
+  │
+  └── Operator Manages:
+      ├── labels (application-specific)
+      ├── name and namespace
+      └── lifecycle (creation/deletion)
+
+*⚠️* *Critical* *Rule:* Never modify the `data` field - CNO will overwrite your changes!
+
+* Step 2: Get Proxy Configuration
+
+Read from operator's environment variables (injected by OLM):
+
+.code -edit proxy-examples/reconciler-proxy.go /START GETPROXY OMIT/,/END GETPROXY OMIT/
+
+The proxy configuration follows this precedence order:
+
+- ExternalSecretsConfig
+- ExternalSecretsManager
+- OLM Environment Variables
+
+* Step 3: Apply Proxy Environment Variables
+
+Inject proxy settings into operand containers (both uppercase and lowercase):
+
+.code -edit proxy-examples/reconciler-proxy.go /START SETENV OMIT/,/END SETENV OMIT/
+
+*Why* *both* *cases?* Different applications expect different formats
+
+* Step 4: Mount Trusted CA Bundle
+
+Add volume:
+
+.code -edit proxy-examples/reconciler-volume.go /START VOLUME OMIT/,/END VOLUME OMIT/
+
+Add volume mount:
+
+.code -edit proxy-examples/reconciler-volume.go /START MOUNT OMIT/,/END MOUNT OMIT/
+
+* Apply to All Container Types
+
+Don't forget init containers!
+
+.code -edit proxy-examples/reconciler-apply.go /START APPLY OMIT/,/END APPLY OMIT/
+
+* Watching ConfigMap Changes Efficiently
+
+* The Challenge
+
+CNO updates ConfigMap's `data` field with CA certificates.
+
+We need to:
+- ✅ Trigger reconciliation when *labels* change (operator's responsibility)
+- ❌ Avoid triggering when *data* changes (CNO's responsibility)
+- ❌ Never compete with CNO by modifying `data`
+
+
+* Implementation: WatchesMetadata
+
+Use `WatchesMetadata` instead of `Watches`:
+
+.code -edit proxy-examples/controller-setup.go /START SETUP OMIT/,/END SETUP OMIT/
+
+* Predicates for Filtering
+
+Label change predicate:
+
+  predicate.LabelChangedPredicate{}
+
+Managed resource predicate (custom):
+
+.code -edit proxy-examples/controller-predicates.go /START PREDICATE OMIT/,/END PREDICATE OMIT/
+
+
+* Summary: Design Patterns
+
+* Design Patterns
+
+*1.* *Hierarchical* *Configuration*
+
+  User CR Spec → Operator Global → Platform
+
+- Operator reads from environment (OLM-injected)
+- Operator propagates to operand workloads
+- Single source of truth flows through operator
+
+*2.* *Separation* *of* *Ownership*
+
+- CNO manages ConfigMap data (certificates)
+- Operator manages ConfigMap labels
+- Avoid reconciliation on CNO data updates
+
+* Design Patterns
+
+*3.*
+
+- Apply proxy settings to containers AND init containers
+- Both uppercase and lowercase environment variables
+
+
+
+* Design Limitations and Considerations
+
+* OLM Bundle ConfigMap Management
+
+*Issue:* ConfigMap in OLM bundle is not managed by OLM
+
+  bundle/manifests/
+  └── my-operator-trusted-ca-bundle.yaml  ← Not managed by OLM!
+
+*Implications:*
+
+- Manual ConfigMap deletion breaks operator pods
+
+
+* Comparison with cert-manager-operator
+
+* cert-manager Manual Configuration Steps
+
+*Step* *1:* Manually create ConfigMap with CA bundle
+
+  $ oc create configmap trusted-ca -n cert-manager-operator \
+      --from-file=ca-bundle.crt=<path_to_certs>
+
+*Step* *2:* Patch the Subscription to add trustedCA reference
+
+  $ oc patch subscription cert-manager \
+      --type='merge' \
+      -p '{"spec":{"config":{"env":[...],"volumes":[...],"volumeMounts":[...]}}}'
+
+*TRUSTED_CA_CONFIGMAP_NAME*
+
+
+
+
+* Questions?
+
+Thank you for your attention!
+
+.image https://raw.githubusercontent.com/openshift/console/master/frontend/public/imgs/logos/openshift.svg 150 _
+
+

@@ -1,0 +1,12 @@
+apiVersion: config.openshift.io/v1
+kind: Proxy
+metadata:
+  name: cluster
+# START SPEC OMIT
+spec:
+  httpProxy: http://proxy.example.com:8080
+  httpsProxy: https://proxy.example.com:8443
+  noProxy: .cluster.local,.svc,localhost,127.0.0.1,10.0.0.0/8,172.30.0.0/16
+  trustedCA:
+    name: user-ca-bundle
+# END SPEC OMIT
